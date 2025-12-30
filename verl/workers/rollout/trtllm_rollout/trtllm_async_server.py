@@ -17,7 +17,6 @@ import os
 from typing import Any, Optional
 
 import ray
-import torch
 from omegaconf import DictConfig
 from ray.actor import ActorHandle
 from ray.util import placement_group_table
@@ -25,6 +24,7 @@ from ray.util.placement_group import PlacementGroup
 
 from verl.single_controller.ray import RayClassWithInitArgs, SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import is_cuda_available
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import TRTLLMAsyncRollout
@@ -61,7 +61,7 @@ class TRTLLMHttpServer:
         bundle_indices: list[list[int]] = None,
     ):
         os.environ["TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL"] = "1"
-        assert torch.cuda.is_available(), "TRTLLM http server should run on GPU node"
+        assert is_cuda_available, "TRTLLM http server should run on GPU node"
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)

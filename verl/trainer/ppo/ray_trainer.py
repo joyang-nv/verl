@@ -929,12 +929,12 @@ class RayPPOTrainer:
         else:
             rm_resource_pool = None
 
-            self.async_rollout_manager = AgentLoopManager(
-                config=self.config,
-                worker_group=self.actor_rollout_wg,
-                rollout_resource_pool=actor_rollout_resource_pool,
-                rm_resource_pool=rm_resource_pool,
-            )
+        self.async_rollout_manager = AgentLoopManager(
+            config=self.config,
+            worker_group=self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
+            rm_resource_pool=rm_resource_pool,
+        )
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
