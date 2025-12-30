@@ -1,43 +1,65 @@
 TensorRT-LLM Backend
-=====================
+====================
 
-Last updated: 12/24/2025.
+Last updated: 12/31/2025.
 
 **Authored By TensorRT-LLM Team**
 
 Introduction
 ------------
-`TensorRT-LLM <https://github.com/NVIDIA/TensorRT-LLM>`_ is a high-performance inference engine for LLMs. Currently, verl fully supports using TensorRT-LLM as the inference engine during the rollout phase.
+`TensorRT-LLM <https://github.com/NVIDIA/TensorRT-LLM>`_ is a high-performance LLM inference engine with state-of-the-art optimizations for NVIDIA GPUs.
+The verl integration of TensorRT-LLM is based on TensorRT-LLM's `Ray orchestrator <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/ray_orchestrator>`_. This integration is in its early stage, with more features and optimizations to come.
+
+The TensorRT-LLM rollout engine primarily targets the colocated mode. Instead of relying purely on standard colocated mode, we adopted a mixed design combining aspects of the hybrid engine and colocated mode.
 
 Installation
 ------------
-The docker file `docker/Dockerfile.stable.trtllm` is a good reference for building your own docker image. In the future it will be based on TensorRT-LLM weekly release build.
+We provide ``docker/Dockerfile.stable.trtllm`` for building a docker image with TensorRT-LLM pre-installed. The verl integration is supported from ``nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6``, and you can choose other TensorRT-LLM versions via ``TRTLLM_BASE_IMAGE`` from the `NGC Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release>`_.
 
-The Dockerfile uses NGC's pre-built TensorRT-LLM release image as the base, which already includes TensorRT-LLM pre-installed. 
-The default base image is ``nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6``, but you can specify a different version using the ``TRTLLM_BASE_IMAGE`` build argument. 
-For available images, visit the `TensorRT-LLM container documentation <https://nvidia.github.io/TensorRT-LLM/installation/containers.html>`_.
+Alternatively, refer to the `TensorRT-LLM installation guide <https://nvidia.github.io/TensorRT-LLM/installation/index.html>`_ for compatible environments if you want to build your own.
 
-If you need to install a specific TensorRT-LLM version after building the image, you can do so by adding installation commands at the end of the Dockerfile.
-Refer to the `TensorRT-LLM installation guide <https://nvidia.github.io/TensorRT-LLM/installation/index.html>`_ for more either pip install or build from source.
-
-Using TensorRT-LLM as the inference engine for GRPO
---------------------------------------------------
-
-We provide a GRPO recipe script `examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh` for you to test the performance and accuracy curve of TensorRT-LLM as the inference engine for GRPO. You can run the script as follows:
+Install verl with TensorRT-LLM:
 
 .. code-block:: bash
-    ## for fSDP training engine
+
+    pip install --upgrade pip
+    pip install -e ".[trtllm]"
+
+.. note::
+
+    Using the TensorRT-LLM rollout requires setting the following environment variables before launching the Ray cluster. These have been included in all the example scripts:
+
+    .. code-block:: bash
+
+        # Clean all SLURM/MPI/PMIx env to avoid PMIx mismatch error.
+        for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'); do
+            unset "$v"
+        done
+
+        # Required for IPC UUID detection
+        export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+
+Using TensorRT-LLM as the Rollout Engine for GRPO
+-------------------------------------------------
+
+We provide the following GRPO recipe scripts for you to test the performance and accuracy curve of TensorRT-LLM as the rollout engine:
+
+.. code-block:: bash
+
+    ## For FSDP training engine
     bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh
-    ## for Megatron-Core training engine
+    ## For Megatron-Core training engine
     bash examples/grpo_trainer/run_qwen2-7b_math_megatron_trtllm.sh
 
-Using TensorRT-LLM as the inference engine for DAPO
---------------------------------------------------
+Using TensorRT-LLM as the Rollout Engine for DAPO
+-------------------------------------------------
 
-We provide a DAPO recipe script `recipe/dapo/test_dapo_7b_math_trtllm.sh`.
+We provide a DAPO recipe script ``recipe/dapo/test_dapo_7b_math_trtllm.sh``.
 
 .. code-block:: bash
-    ## for fSDP training engine
+
+    ## For FSDP training engine
     bash recipe/dapo/test_dapo_7b_math_trtllm.sh
-    ## for Megatron-Core training engine
+    ## For Megatron-Core training engine
     TRAIN_ENGINE=megatron bash recipe/dapo/test_dapo_7b_math_trtllm.sh
+
