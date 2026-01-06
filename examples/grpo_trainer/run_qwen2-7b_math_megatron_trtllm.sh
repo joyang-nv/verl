@@ -26,7 +26,7 @@ fi
 # -----
 # Data
 # -----
-DATADIR=$PWD/data
+DATADIR=${DATADIR:-$PWD/data}
 
 GSM8K_TRAIN_PATH=${DATADIR}/gsm8k/train.parquet
 GSM8K_TEST_PATH=${DATADIR}/gsm8k/test.parquet
@@ -86,4 +86,5 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.resume_mode=disable \
-    trainer.total_epochs=15
+    trainer.total_epochs=15 \
+    "${@:2}"

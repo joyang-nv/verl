@@ -153,8 +153,11 @@ class TRTLLMHttpServer:
         sampling_params: dict[str, Any],
         request_id: str,
         image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        assert image_data is None and video_data is None, "Multimodality is not yet supported in TRTLLMHttpServer."
+
         from tensorrt_llm.llmapi import SamplingParams
 
         max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
