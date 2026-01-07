@@ -8,6 +8,9 @@ done
 export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export RAY_DEDUP_LOGS=0
 
+export WANDB_ENTITY=nvidia
+export WANDB_API_KEY="e776190f12cc7322a6a6f498d7dbec00dfd6ebd0"
+
 # -----
 # Config
 # -----
