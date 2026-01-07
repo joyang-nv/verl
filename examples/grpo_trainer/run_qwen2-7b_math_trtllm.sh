@@ -14,7 +14,7 @@ export RAY_DEDUP_LOGS=0
 TP=${1:-4}
 NNODES=${NNODES:-1}
 PROJECT_NAME=${PROJECT_NAME:-"verl_grpo_example_gsm8k_math"}
-EXP_NAME=trtllm-qwen2-7b-tp${TP}-8gpus${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}
+EXP_NAME=trtllm-qwen2-7b-n${NNODES}-tp${TP}-8gpus${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}
 
 if [ $TP -eq 4 ]; then
     MAX_BATCH_SIZE=1024
