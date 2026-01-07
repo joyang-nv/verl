@@ -8,12 +8,16 @@ done
 export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export RAY_DEDUP_LOGS=0
 
+export WANDB_ENTITY=nvidia
+export WANDB_API_KEY="e776190f12cc7322a6a6f498d7dbec00dfd6ebd0"
+
 # -----
 # Config
 # -----
 TP=${1:-4}
+NNODES=${NNODES:-1}
 PROJECT_NAME=${PROJECT_NAME:-"verl_grpo_example_gsm8k_math"}
-EXP_NAME=trtllm-qwen2-7b-tp${TP}-8gpus${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}
+EXP_NAME=trtllm-qwen2-7b-n${NNODES}-tp${TP}-8gpus${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}
 
 if [ $TP -eq 4 ]; then
     MAX_BATCH_SIZE=1024
@@ -81,7 +85,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name=${EXP_NAME} \
     trainer.n_gpus_per_node=8 \
-    trainer.nnodes=1 \
+    trainer.nnodes=$NNODES \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.resume_mode=disable \
