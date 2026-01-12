@@ -105,7 +105,6 @@ jobs:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
-          max_attempts: 3
 
   e2e_grpo_trainer_fsdp-qwen2:
     needs: setup
@@ -126,9 +125,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-      - name: Prepare GSM8K dataset
-        run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests with FSDP on 8 L20 GPUs (Qwen)
         run: |
           ray stop --force
@@ -138,7 +134,7 @@ jobs:
             data.train_files="['${HOME}/data/gsm8k/train.parquet']" \
             data.val_files="['${HOME}/data/gsm8k/test.parquet']" \
             trainer.logger='["console"]' \
-            actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct
+            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct"
       - name: clean up
         run: |
           rm -rf checkpoints
@@ -162,9 +158,6 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-      - name: Prepare GSM8K dataset
-        run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Qwen)
         run: |
           ray stop --force
@@ -175,7 +168,7 @@ jobs:
             data.train_files="['${HOME}/data/gsm8k/train.parquet']" \
             data.val_files="['${HOME}/data/gsm8k/test.parquet']" \
             trainer.logger='["console"]' \
-            actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct
+            actor_rollout_ref.model.path="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct"
       - name: clean up
         run: |
           rm -rf checkpoints
