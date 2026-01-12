@@ -130,7 +130,17 @@ class RayResourcePool(ResourcePool):
             bundle[device_name] = 1
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
-        pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
+
+        pg_scheme = []
+        for pg_idx, process_count in enumerate(self._store):
+            bundles = []
+            for bundle_idx in range(process_count):
+                b = bundle.copy()
+                # pin the first bundle of first PG to head node
+                if pg_idx == 0:
+                    b["node:head"] = 0.01
+                bundles.append(b)
+            pg_scheme.append(bundles)
 
         lifetime = "detached" if self.detached else None
 
