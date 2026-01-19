@@ -96,7 +96,7 @@ def get_device_uuid(id: int) -> str:
                 raise RuntimeError(f"Failed to initialize NVML: {e}") from e
 
     # The process has visibility to all GPUs within the TP group
-    global_device_idx = device_id_to_physical_device_id(id)
+    global_device_idx = id
 
     # Get the device handle and UUID
     try:
