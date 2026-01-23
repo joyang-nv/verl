@@ -30,6 +30,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
+from verl.utils.device import get_torch_device
 
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -45,6 +46,16 @@ DEFAULT_RETRY_DELAY = 2.0
 DEFAULT_MAX_CONNECTIONS = 2000
 DEFAULT_MAX_WAIT_TIME = 300.0
 
+
+def get_total_available_bytes(pg: dist.ProcessGroup, rank: int, ratio: float, message: str = "") -> int:
+    mem_allocated = get_torch_device().memory_allocated()
+    mem_reserved = get_torch_device().memory_reserved()
+    mem_free, mem_total = get_torch_device().mem_get_info()
+    mem_free = mem_free + mem_reserved - mem_allocated
+    mem_free = torch.tensor(mem_free)
+    dist.all_reduce(mem_free, op=dist.ReduceOp.MIN, group=pg)
+    mem_free = mem_free.item()
+    return int(mem_free * ratio)
 
 def device_id_to_physical_device_id(id: int) -> int:
     """Convert a logical device ID to a physical device ID considering CUDA_VISIBLE_DEVICES."""
@@ -326,6 +337,16 @@ class ServerAdapter(BaseRollout):
             self.replica_rank = replica_rank
             self.is_leader_rank = rank == 0
 
+        world_size = int(os.getenv("WORLD_SIZE"))
+        tp_size = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        device_mesh_kwargs = dict(
+            mesh_shape=(world_size // tp_size, tp_size, 1),
+            mesh_dim_names=["dp", "tp", "pp"],
+        )
+        self._device_mesh_cpu = init_device_mesh("cpu", **device_mesh_kwargs)
+        self.replica_rank = self._device_mesh_cpu["dp"].get_local_rank()
+        self.node_rank = 0  # TODO: support multiple nodes
+
         # Below is required for all modes.
         assert self.replica_rank >= 0, "replica_rank is not set"
         assert self.is_leader_rank is not None, "is_leader_rank is not set"
@@ -407,7 +428,14 @@ class ServerAdapter(BaseRollout):
         if self.is_leader_rank:
             await self._init_server_adapter()
 
-        total_available_bytes = int(self.config.update_weights_bucket_megabytes) * 1024 * 1024
+        #total_available_bytes = int(self.config.update_weights_bucket_megabytes) * 1024 * 1024
+
+        total_available_bytes = await asyncio.to_thread(
+            get_total_available_bytes,
+            self._device_mesh_cpu["tp"].get_group(),
+            self._device_mesh_cpu["tp"].get_local_rank(),
+            0.5,
+        )
 
         try:
             device_uuid = get_device_uuid(self.gpu_id)
