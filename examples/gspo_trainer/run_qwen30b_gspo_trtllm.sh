@@ -6,10 +6,14 @@ DATA_ROOT=${DATA_ROOT:-$PWD}
 
 NNODES=${NNODES:-4}
 
+if [ ! -z "$EXPERIMENT_POSTFIX" ]; then
+    EXPERIMENT_POSTFIX="-${EXPERIMENT_POSTFIX}"
+fi
+
 # wandb
 backend=${backend:-megatron} # fsdp, fsdp2, megatron
-project_name=wuxibin_gspo
-experiment_name=qwen3-30B-base-grpo-$backend
+project_name=${PROJECT_NAME:-'wuxibin_gspo'}
+experiment_name=qwen3-30B-gspo-$backend-n${NNODES}
 default_local_dir=$DATA_ROOT/checkpoint/$project_name/$experiment_name
 
 # ===================================== Algorithm =====================================
@@ -195,7 +199,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=$critic_warmup \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$project_name \
-    trainer.experiment_name=$experiment_name \
+    trainer.experiment_name=${experiment_name}${EXPERIMENT_POSTFIX} \
     trainer.default_local_dir=$default_local_dir \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=$NNODES \
@@ -208,4 +212,4 @@ python3 -m verl.trainer.main_ppo \
     $ACTOR_CONFIG \
     $CIRITC_CONFIG \
     $ROLLOUT_CONFIG \
-    $REWARD_CONFIG
+    $REWARD_CONFIG $@
