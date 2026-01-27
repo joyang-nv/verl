@@ -35,6 +35,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 
+# from torch.profiler import ProfilerActivity, profile, record_function
+
 try:
     # for torch 2.5+
     from torch.distributed.tensor import DTensor
@@ -673,6 +675,56 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # NOTE: It's critical that hybrid engine in trainer mode initially to load checkpoint.
         # For async mode, we can't call run_until_complete here, so we will switch to trainer mode in AgentLoopManager.
         # Note: sync mode is deprecated and rejected in RolloutConfig.__post_init__
+
+        # Memory snapshot step tracking
+        self._memory_snapshot_step = 0
+
+    def _maybe_start_memory_snapshot(self):
+        # if os.getenv("USE_MEMORY_SNAPSHOT", "0") != "1":
+        #     return
+        max_entries = int(os.getenv("VERL_MEMORY_SNAPSHOT_MAX_ENTRIES", "100000"))
+        torch.cuda.memory._record_memory_history(max_entries=max_entries)
+
+        marker_path = "/lustre/fsw/coreai_dlalgo_llm/erinh/verl-integ/mem_snapshot/snapshot_started.txt"
+        try:
+            os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+            with open(marker_path, "w") as f:
+                f.write(f"Memory snapshot started at {os.getcwd()}\n")
+                f.write(f"Rank: {self.rank}\n")
+                f.write(f"PID: {os.getpid()}\n")
+        except Exception:
+            pass
+
+        print(f"===Started memory snapshot (rank {self.rank}, pid {os.getpid()})")
+
+    def _maybe_dump_memory_snapshot(self, suffix: str = ""):
+        # if os.getenv("USE_MEMORY_SNAPSHOT", "0") != "1":
+        #     return
+
+        snapshot_path = os.getenv(
+            "VERL_MEMORY_SNAPSHOT_PATH",
+            os.path.join(
+                "/lustre/fsw/coreai_dlalgo_llm/erinh/verl-integ/mem_snapshot", "verl_update_weights_snapshot2.pickle"
+            ),
+        )
+        if suffix:
+            base, ext = os.path.splitext(snapshot_path)
+            snapshot_path = f"{base}{suffix}{ext}" if ext else f"{snapshot_path}{suffix}"
+        try:
+            torch.cuda.memory._dump_snapshot(snapshot_path)
+            print(f"===Saved memory snapshot to {snapshot_path} (rank {self.rank}, pid {os.getpid()})")
+
+            # Write confirmation file
+            confirm_path = snapshot_path.replace(".pickle", "_confirmed.txt")
+            with open(confirm_path, "w") as f:
+                f.write("Snapshot saved successfully\n")
+                f.write(f"Path: {snapshot_path}\n")
+                f.write(f"Rank: {self.rank}\n")
+                f.write(f"PID: {os.getpid()}\n")
+        except Exception as e:
+            raise RuntimeError(f"Failed to capture memory snapshot: {e}") from e
+        finally:
+            torch.cuda.memory._record_memory_history(enabled=None)
 
     async def rollout_mode(self):
         """Context switch hybridengine to rollout mode."""
@@ -1985,5 +2037,9 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
+        self._maybe_start_memory_snapshot()
         await self.rollout_mode()
+        self._maybe_dump_memory_snapshot(suffix=f".step_{self._memory_snapshot_step}")
+        self._memory_snapshot_step += 1
+
         return True
