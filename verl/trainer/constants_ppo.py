@@ -36,6 +36,7 @@ PPO_RAY_RUNTIME_ENV = {
         # https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/maintenref/envvar/envref_07_0143.html
         "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
         "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+        "VERL_TOTAL_TRAINING_STEPS": os.getenv("VERL_TOTAL_TRAINING_STEPS", "0"),
     },
 }
 

@@ -22,6 +22,8 @@ import os
 import warnings
 from dataclasses import asdict
 
+RECORD_PER_STEP = True
+
 import numpy as np
 import psutil
 import torch
@@ -309,7 +311,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if use_tiled_mlp and self.config.actor.strategy == "fsdp":
             raise ValueError("TiledMLP requires FSDP2. Set `actor_rollout_ref.actor.strategy=fsdp2`.")
 
-        log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
+        log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=None)
         local_path = model_path
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
@@ -489,7 +491,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             print_model_size(actor_module)
 
-        log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=logger)
+        log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=None)
 
         # We wrap FSDP for rollout as well
         mixed_precision_config = fsdp_config.get("mixed_precision", None)
@@ -570,7 +572,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 
-        log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
+        log_gpu_memory_usage(f"After {role} FSDP init", logger=None)
 
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
@@ -605,7 +607,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
 
-            log_gpu_memory_usage(f"After {role} optimizer init", logger=logger)
+            log_gpu_memory_usage(f"After {role} optimizer init", logger=None)
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
@@ -647,11 +649,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         # 4. build rollout model
-        log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=logger)
+        log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=None)
         self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
             config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
         )
-        log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=logger)
+        log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
 
         # Full params
         if torch.distributed.get_world_size() == 1 and fsdp_version(self.actor_module_fsdp) == 1:
@@ -697,40 +699,35 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         print(f"===Started memory snapshot (rank {self.rank}, pid {os.getpid()})")
 
-    def _maybe_dump_memory_snapshot(self, suffix: str = ""):
+    def _maybe_dump_memory_snapshot(self, suffix: str = "", stop_recording: bool = False):
         # if os.getenv("USE_MEMORY_SNAPSHOT", "0") != "1":
         #     return
 
         snapshot_path = os.getenv(
             "VERL_MEMORY_SNAPSHOT_PATH",
             os.path.join(
-                "/lustre/fsw/coreai_dlalgo_llm/erinh/verl-integ/mem_snapshot", "verl_update_weights_snapshot2.pickle"
+                "/lustre/fsw/coreai_dlalgo_llm/erinh/verl-integ/mem_snapshot", "verl_update_weights_snapshot.pickle"
             ),
         )
-        if suffix:
-            base, ext = os.path.splitext(snapshot_path)
-            snapshot_path = f"{base}{suffix}{ext}" if ext else f"{snapshot_path}{suffix}"
+        
+        base, ext = os.path.splitext(snapshot_path)
+        snapshot_path = f"{base}_rank{self.rank}{suffix}{ext}" if ext else f"{snapshot_path}_rank{self.rank}{suffix}"
+        
         try:
             torch.cuda.memory._dump_snapshot(snapshot_path)
-            print(f"===Saved memory snapshot to {snapshot_path} (rank {self.rank}, pid {os.getpid()})")
-
-            # Write confirmation file
-            confirm_path = snapshot_path.replace(".pickle", "_confirmed.txt")
-            with open(confirm_path, "w") as f:
-                f.write("Snapshot saved successfully\n")
-                f.write(f"Path: {snapshot_path}\n")
-                f.write(f"Rank: {self.rank}\n")
-                f.write(f"PID: {os.getpid()}\n")
+            print(f"Saved memory snapshot to {snapshot_path} (rank {self.rank}, pid {os.getpid()})")
         except Exception as e:
             raise RuntimeError(f"Failed to capture memory snapshot: {e}") from e
         finally:
-            torch.cuda.memory._record_memory_history(enabled=None)
+            if stop_recording:
+                torch.cuda.memory._record_memory_history(enabled=None)
+                print(f"Stopped memory snapshot recording (rank {self.rank})")
 
     async def rollout_mode(self):
         """Context switch hybridengine to rollout mode."""
         aggressive_empty_cache(force_sync=True)
 
-        log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
+        log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=None)
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
@@ -768,10 +765,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 base_model_params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
             )
 
-        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=None)
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=None)
 
         set_expandable_segments(False)
 
@@ -786,7 +783,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
-        log_gpu_memory_usage("After resume weights", logger=logger)
+        log_gpu_memory_usage("After resume weights", logger=None)
 
         if peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2:
             per_tensor_base_params = (
@@ -797,7 +794,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             del base_model_params, per_tensor_base_params
 
         await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done)
-        log_gpu_memory_usage("After update_weights", logger=logger)
+        log_gpu_memory_usage("After update_weights", logger=None)
         del params, per_tensor_param
         aggressive_empty_cache(force_sync=True)
         if self.config.rollout.free_cache_engine:
@@ -862,7 +859,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                log_gpu_memory_usage("After offload actor model during init", logger=logger)
+                log_gpu_memory_usage("After offload actor model during init", logger=None)
 
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
@@ -979,7 +976,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
+            log_gpu_memory_usage("After offload actor model during update_actor", logger=None)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
@@ -1007,7 +1004,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_actor:  # For rollout only, we do not switch context.
             loop = get_event_loop()
             loop.run_until_complete(self.rollout_mode())
-            log_gpu_memory_usage("After switch to rollout mode", logger=logger)
+            log_gpu_memory_usage("After switch to rollout mode", logger=None)
 
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
@@ -1084,7 +1081,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
+            log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=None)
 
         return output
 
@@ -1572,7 +1569,7 @@ class CriticWorker(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After offload critic model during init", logger=logger)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
-            log_gpu_memory_usage("After offload critic optimizer during init", logger=logger)
+            log_gpu_memory_usage("After offload critic optimizer during init", logger=None)
 
         self.critic = DataParallelPPOCritic(
             config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer
@@ -2037,9 +2034,19 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
-        self._maybe_start_memory_snapshot()
+        if self._memory_snapshot_step == 0:
+            self._maybe_start_memory_snapshot()
+
         await self.rollout_mode()
-        self._maybe_dump_memory_snapshot(suffix=f".step_{self._memory_snapshot_step}")
+
         self._memory_snapshot_step += 1
+
+        if RECORD_PER_STEP:
+            self._maybe_dump_memory_snapshot(suffix=f".step{self._memory_snapshot_step}", stop_recording=False)
+        else:
+            # Dump snapshot only after all training steps
+            total_steps = int(os.getenv("VERL_TOTAL_TRAINING_STEPS", "0"))
+            if total_steps > 0 and self._memory_snapshot_step >= total_steps:
+                self._maybe_dump_memory_snapshot(suffix=".all_steps", stop_recording=True)
 
         return True
