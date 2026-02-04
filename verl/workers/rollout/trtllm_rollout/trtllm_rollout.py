@@ -334,6 +334,9 @@ class ServerAdapter(BaseRollout):
         Args:
             tag: weights or kv_cache.
         """
+        # sync to avoid oom
+        if "kv_cache" in tags:
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
