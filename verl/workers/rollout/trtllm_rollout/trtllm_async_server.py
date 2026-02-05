@@ -95,11 +95,18 @@ class TRTLLMHttpServer:
 
         logger.info(f"TRTLLMHttpServer, replica_rank: {self.replica_rank}")
 
+        # self.sampling_args = {
+        #     "detokenize": False,
+        #     "end_id": -1,
+        #     "pad_id": self.model_config.hf_config.pad_token_id,
+        #     "stop_token_ids": [self.model_config.hf_config.eos_token_id],
+        #     "include_stop_str_in_output": True,
+        # }
+
         self.sampling_args = {
             "detokenize": False,
-            "end_id": -1,
+            "end_id": self.model_config.hf_config.eos_token_id,
             "pad_id": self.model_config.hf_config.pad_token_id,
-            "stop_token_ids": [self.model_config.hf_config.eos_token_id],
             "include_stop_str_in_output": True,
         }
 
@@ -137,7 +144,8 @@ class TRTLLMHttpServer:
             "per_worker_gpu_share": per_worker_gpu_share,
             "enable_sleep": True,
             "allreduce_strategy": "NCCL",
-            "sampler_type": "TRTLLMSampler",
+            # "sampler_type": "TRTLLMSampler",
+            "sampler_type": "TorchSampler",
             **engine_kwargs,
         }
 
@@ -162,7 +170,7 @@ class TRTLLMHttpServer:
                     )
                 }
             )
-            llm_kwargs["kv_cache_config"].host_cache_size=160*1024*1024*1024  # 160 GB
+            llm_kwargs["kv_cache_config"].host_cache_size=80*1024*1024*1024  # 80 GB
 
         self.llm = await AsyncLLM(**llm_kwargs)
 
@@ -227,13 +235,6 @@ class TRTLLMHttpServer:
             await self.llm.release(tags=ServerAdapter.get_full_tags())
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
-
-    async def report_device_ids(self) -> list[str]:
-        """Report GPU device UUIDs from TRT-LLM workers."""
-        return await self.llm.collective_rpc(
-            "report_device_id",
-            unique_reply_rank=0,
-        )
 
 
 _rollout_worker_actor_cls = ray.remote(ServerAdapter)

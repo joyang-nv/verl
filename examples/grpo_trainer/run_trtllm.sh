@@ -15,17 +15,32 @@ TP=${1:-4}
 PROJECT_NAME=${PROJECT_NAME:-"verl_grpo_example_gsm8k_math"}
 EXP_NAME=trtllm-qwen2-7b-tp${TP}-8gpus${EXP_NAME_SUFFIX:+"-"}${EXP_NAME_SUFFIX}
 
+
+
+
+#MODEL_PATH=/lustre/fsw/coreai_comparch_trtllm/llm_data/llm-models/Qwen3/Qwen3-30B-A3B
+#if [ $TP -eq 4 ]; then
+#    MAX_BATCH_SIZE=1024
+#    CUDA_GRAPH_SIZES='[8, 32, 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024]'
+#else
+#    MAX_BATCH_SIZE=512
+#    CUDA_GRAPH_SIZES='[8, 32, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512]'
+#fi
+
+MODEL_PATH=/lustre/fsw/coreai_comparch_trtllm/llm_data/llm-models/Qwen3/Qwen3-32B
 if [ $TP -eq 4 ]; then
-    MAX_BATCH_SIZE=1024
+    MAX_BATCH_SIZE=512
+    CUDA_GRAPH_SIZES='[8, 64, 128, 160, 192, 224, 256, 320, 384, 448, 512]'
 else
     MAX_BATCH_SIZE=512
+    CUDA_GRAPH_SIZES='[8, 32, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512]'
 fi
 
 # -----
 # Data
 # -----
 DATADIR=${DATADIR:-$PWD/data}
-MODEL_PATH=/lustre/fsw/coreai_comparch_trtllm/llm_data/llm-models/Qwen3/Qwen3-32B
+#MODEL_PATH=/lustre/fsw/coreai_comparch_trtllm/llm_data/llm-models/Qwen3/Qwen3-30B-A3B
 #MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2-7B-Instruct"}
 
 GSM8K_TRAIN_PATH=${DATADIR}/gsm8k/train.parquet
@@ -65,6 +80,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${TP} \
     actor_rollout_ref.rollout.name=trtllm \
@@ -72,9 +88,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.rollout.max_num_seqs=${MAX_BATCH_SIZE} \
-    actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
+    actor_rollout_ref.rollout.cudagraph_capture_sizes="${CUDA_GRAPH_SIZES}" \
+    actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
     +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_timeout_iters=32 \
-    +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.5 \
+    +actor_rollout_ref.rollout.engine_kwargs.trtllm.batch_wait_max_tokens_ratio=0.9 \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
