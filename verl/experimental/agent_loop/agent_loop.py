@@ -937,12 +937,16 @@ class AgentLoopManager:
         """
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        import time
+        start_time = time.perf_counter()
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk)
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+        end_time = time.perf_counter()
+        print(f"Validation time: {end_time - start_time:.2f} seconds")
         output = DataProto.concat(outputs)
 
         # calculate performance metrics
