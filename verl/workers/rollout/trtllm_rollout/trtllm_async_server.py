@@ -168,6 +168,7 @@ class TRTLLMHttpServer:
                     ),
                 }
             )
+            llm_kwargs["kv_cache_config"].host_cache_size = 80 * 1024 * 1024 * 1024  # 160 GB
 
         self.llm = await AsyncLLM(**llm_kwargs)
 
