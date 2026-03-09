@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import inspect
 import json
 import logging
 import os
+import sys
 import random
 from collections.abc import Callable
 from dataclasses import asdict
@@ -40,7 +42,7 @@ from verl.utils.megatron_utils import (
     get_hf_model_checkpoint_path,
     get_transformer_config_checkpoint_path,
 )
-
+from verl.utils.profiler.performance import format_cpu_memory_str, get_cpu_memory_info
 from .checkpoint_manager import BaseCheckpointManager
 
 # Setup logging
@@ -53,6 +55,26 @@ if not mcore_ge_014:
         megatron.core.__version__,
     )
 
+
+def _debug_state_dict_referrers(state_dict, rank: int, label: str = "state_dict"):
+    """When VERL_DEBUG_STATE_DICT_REFCOUNT=1, log refcount and who refers to state_dict."""
+    rc = sys.getrefcount(state_dict)
+    referrers = gc.get_referrers(state_dict)
+    log_with_rank(
+        f"[{label}] refcount={rc} (expect 2 if only local var), referrers={len(referrers)}",
+        rank=rank,
+        logger=logger,
+    )
+    for i, ref in enumerate(referrers):
+        try:
+            info = f"  [{i}] {type(ref).__name__}"
+            if isinstance(ref, dict):
+                info += f" keys={list(ref.keys())[:5]}..."
+            elif hasattr(ref, "__name__"):
+                info += f" {getattr(ref, '__name__', '')}"
+            log_with_rank(info, rank=rank, logger=logger)
+        except Exception:
+            log_with_rank(f"  [{i}] {type(ref).__name__} (repr failed)", rank=rank, logger=logger)
 
 class MegatronCheckpointManager(BaseCheckpointManager):
     """
@@ -293,7 +315,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 state_dict["lr_scheduler"] = lr_state_dict
 
         if not generate_model:
-            state_dict.pop("model", None)
+            if len(self.model) == 1:
+                state_dict.pop("model", None)
+            else:
+                for vpp_rank in range(len(self.model)):
+                    state_dict.pop(f"model{vpp_rank}", None)
 
         # RNG States State Dict
         if generate_extra:
@@ -534,12 +560,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             assert self.use_hf_checkpoint, "When not using distributed checkpointing, use_hf_checkpoint should be True."
             # Generate optimizer and exra state dicts
             sharded_sd_metadata = self._build_sharded_state_dict_metadata()
+            cpu = get_cpu_memory_info()
+            cpu_str = format_cpu_memory_str(cpu)
+            log_with_rank(f"before generate state_dict(optim_extra), CPU memory: {cpu_str}", rank=self.rank, logger=logger)
             state_dict = self.generate_state_dict(
                 generate_model=False,
                 generate_optimizer=self.should_save_optimizer,
                 generate_extra=self.should_save_extra,
                 metadata=sharded_sd_metadata,
             )
+            cpu = get_cpu_memory_info()
+            cpu_str = format_cpu_memory_str(cpu)
+            log_with_rank(f"After generate state_dict(optim_extra), CPU memory: {cpu_str}", rank=self.rank, logger=logger)
             # Save optimizer and extra states to local path
             # Start Async save if enabled
             async_save_request = save_dist_checkpointing(
@@ -549,10 +581,33 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 content_metadata=sharded_sd_metadata,
             )
 
+            cpu = get_cpu_memory_info()
+            cpu_str = format_cpu_memory_str(cpu)
+            log_with_rank(f"After save_dist_checkpointing, CPU memory: {cpu_str}", rank=self.rank, logger=logger)
             # Synchronize all async save requests
             if not self.checkpoint_config.async_save:
                 assert async_save_request is None, "Async save request should be None when not using async save."
                 torch.distributed.barrier()
+                _debug_state_dict_referrers(state_dict, self.rank, "state_dict(optim_extra)")
+                for key in ['optimizer', 'lr_scheduler', 'rng_state', 'content_metadata']:
+                    value = state_dict.pop(key, None)
+                    if value is not None:
+                        _debug_state_dict_referrers(value, self.rank, f"state_dict({key})")
+                        del value
+
+                del state_dict
+                torch._C._host_emptyCache()
+                cpu = get_cpu_memory_info()
+                cpu_str = format_cpu_memory_str(cpu)
+                log_with_rank(f"After empty host cache, CPU memory: {cpu_str}", rank=self.rank, logger=logger)
+                gc.collect()
+                cpu = get_cpu_memory_info()
+                cpu_str = format_cpu_memory_str(cpu)
+                log_with_rank(f"After gc, CPU memory: {cpu_str}", rank=self.rank, logger=logger)
+
+            cpu = get_cpu_memory_info()
+            cpu_str = format_cpu_memory_str(cpu)
+            log_with_rank(f"After save state_dict(optim_extra), CPU memory: {cpu_str}", rank=self.rank, logger=logger)
 
         if self.should_save_model:
             # Save adapter-only checkpoint if PEFT is enabled
@@ -590,6 +645,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 else:
                     self.bridge.save_hf_weights(self.model, hf_ckpt_path)
 
+                cpu = get_cpu_memory_info()
+                cpu_str = format_cpu_memory_str(cpu)
+                log_with_rank(f"After save bridge checkpoint, CPU memory: {cpu_str}", rank=self.rank, logger=logger)
                 log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 
             # Only rank 0 saves the hf config and tokenizer to huggingface path
@@ -651,6 +709,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
                 with open(transformer_config_path, "w") as f:
                     json.dump(transformer_config_dict, f, indent=2)
+                del transformer_config_dict
 
         if self.should_save_hf_model and not self.use_hf_checkpoint:
             # wait for everyone to dump to local
@@ -703,6 +762,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                         logger=logger,
                         log_only_rank_0=True,
                     )
+                    del model
+                    cpu = get_cpu_memory_info()
+                    cpu_str = format_cpu_memory_str(cpu)
+                    log_with_rank(f"After save hf_model_ckpt, CPU memory: {cpu_str}", rank=self.rank, logger=logger)
 
                     if hdfs_path is not None:
                         log_with_rank(
@@ -718,6 +781,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                             logger=logger,
                             log_only_rank_0=True,
                         )
+                _debug_state_dict_referrers(state_dict, self.rank, "state_dict(hf_model)")
+                del state_dict
+                cpu = get_cpu_memory_info()
+                cpu_str = format_cpu_memory_str(cpu)
+                log_with_rank(f"After save state_dict(hf_model), CPU memory: {cpu_str}", rank=self.rank, logger=logger)
 
         def finalize_save_fn():
             # Rank 0 uploads checkpoint to HDFS if hdfs_path is provided
@@ -747,6 +815,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     f.write(str(global_step))
 
             self.register_checkpoint(local_path, max_ckpt_to_keep)
+            gc.collect()
+            cpu = get_cpu_memory_info()
+            cpu_str = format_cpu_memory_str(cpu)
+            log_with_rank(f"After gc, CPU memory: {cpu_str}", rank=self.rank, logger=logger)
 
         if self.checkpoint_config.async_save:
             assert async_save_request is not None, "Async save request should not be None when using async save."

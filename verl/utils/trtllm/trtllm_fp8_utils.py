@@ -71,11 +71,11 @@ def should_quantize_param(param_name: str) -> bool:
     # Check if matches include patterns
     for pattern in include_patterns:
         if pattern in param_lower:
-            logger.debug(f"Will quantize FP8: {param_name}")
+            # logger.debug(f"Will quantize FP8: {param_name}")
             return True
 
     # Do not quantize by default
-    logger.debug(f"Skip quantization: {param_name}")
+    # logger.debug(f"Skip quantization: {param_name}")
     return False
 
 
@@ -107,8 +107,8 @@ def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
 
         # Quantize to FP8
         try:
-            if torch.distributed.get_rank() == 0:
-                logger.debug(f"Quantizing to FP8 blockwise: {k}")
+            # if torch.distributed.get_rank() == 0:
+                # logger.debug(f"Quantizing to FP8 blockwise: {k}")
 
             param_lp, param_scale = scaled_fp8_blockwise(
                 v.to(dtype),
