@@ -117,6 +117,7 @@ class TRTLLMHttpServer:
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CapacitySchedulerPolicy, CudaGraphConfig, KvCacheConfig, SchedulerConfig
+        from tensorrt_llm.llmapi.llm_args import ExecutorMemoryType, SleepConfig
         from tensorrt_llm.serve import OpenAIServer
 
         assert self.config.pipeline_model_parallel_size == 1, "pipeline_model_parallel_size > 1 is not supported yet"
@@ -141,9 +142,24 @@ class TRTLLMHttpServer:
                 engine_kwargs["model_kwargs"] = {"quantization_config": FP8_BLOCK_QUANT_KWARGS}
                 if self.config.load_format != "dummy":
                     raise ValueError("FP8 quantization is only supported for dummy load format")
+            elif quantization == "nvfp4":
+                NVFP4_QUANT_KWARGS = {
+                    "quant_method": "nvfp4",
+                    "group_size": 16,
+                }
+                engine_kwargs["model_kwargs"] = {"quantization_config": NVFP4_QUANT_KWARGS}
+                engine_kwargs["force_dynamic_quantization"] = True
+                if self.config.load_format != "dummy":
+                    raise ValueError("NVFP4 quantization is only supported for dummy load format")
             else:
-                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+                raise ValueError(f"Currently only support fp8/nvfp4 quantization, got: {quantization}")
 
+        sleep_config = SleepConfig(
+            restore_modes={
+                ExecutorMemoryType.MODEL_WEIGHTS_MAIN: "NONE",
+                ExecutorMemoryType.KV_CACHE: "NONE",
+            }
+        )
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
@@ -164,7 +180,7 @@ class TRTLLMHttpServer:
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
             "per_worker_gpu_share": per_worker_gpu_share,
-            "enable_sleep": self.config.enable_sleep_mode,
+            "sleep_config": sleep_config,
             "allreduce_strategy": "NCCL",
             "sampler_type": "TRTLLMSampler",
             **engine_kwargs,

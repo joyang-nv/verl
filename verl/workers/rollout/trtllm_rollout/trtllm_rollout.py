@@ -425,7 +425,8 @@ class ServerAdapter(BaseRollout):
 
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
 
-        if self.config.get("quantization", None) == "fp8":
+        quantization = self.config.get("quantization", None)
+        if quantization == "fp8":
             from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
 
             fp8_quantizer_helper = TRTLLMFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
@@ -433,6 +434,12 @@ class ServerAdapter(BaseRollout):
                 weights,
                 dtype=self.model_config.hf_config.dtype,
             )
+        elif quantization == "nvfp4":
+            from verl.utils.trtllm.trtllm_nvfp4_utils import TRTLLMNVFP4QuantizerHelper
+
+            nvfp4_quant_config = {"quant_method": "nvfp4", "group_size": 16}
+            nvfp4_quantizer_helper = TRTLLMNVFP4QuantizerHelper(nvfp4_quant_config)
+            weights = nvfp4_quantizer_helper.quantize_weights(weights)
 
         try:
             device_uuid = get_device_uuid(int(self.gpu_id))
