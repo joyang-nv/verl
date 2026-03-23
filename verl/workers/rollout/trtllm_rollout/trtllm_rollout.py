@@ -259,6 +259,7 @@ class AsyncTRTLLMHttpAdapter:
 
 
 class ServerAdapter(BaseRollout):
+    # TODO: change to non hard-coded
     _WEIGHTS_TAGS = [
         "sampler",
         "drafter",
@@ -267,7 +268,9 @@ class ServerAdapter(BaseRollout):
         "model_extra",
         "executor_extra",
         "model",
+        "model_weights",
         "draft_model",
+        "draft_model_weights",
     ]
 
     @staticmethod
@@ -460,8 +463,9 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
+        is_vlm = self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
         # Query if model supports partial loading
-        supports_partial_loading = await self.get_supports_partial_loading()
+        supports_partial_loading = await self.get_supports_partial_loading() if self.is_vlm else True
 
         for name, param in weights:
             if supports_partial_loading:
