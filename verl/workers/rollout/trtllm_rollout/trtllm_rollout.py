@@ -463,7 +463,7 @@ class ServerAdapter(BaseRollout):
             cur_available_bytes = total_available_bytes
             cur_handles = []
 
-        is_vlm = self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
+        self.is_vlm = self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
         # Query if model supports partial loading
         supports_partial_loading = await self.get_supports_partial_loading() if self.is_vlm else True
 
