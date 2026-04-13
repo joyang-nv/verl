@@ -45,6 +45,19 @@ from .checkpoint_manager import BaseCheckpointManager
 
 # Setup logging
 logger = logging.getLogger(__file__)
+
+
+def _ckpt_mem_mb() -> float:
+    """Return current process RSS in MiB for checkpoint memory debugging."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / 1024 ** 2
+    except Exception:
+        try:
+            import resource
+            return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        except Exception:
+            return -1.0
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 mcore_ge_014 = version.parse(megatron.core.__version__) >= version.parse("0.14.0")
 if not mcore_ge_014:
@@ -262,6 +275,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # Should always generate model state dict
         # All ranks Save Model to reduce memory pressure
         # Get sharded state dict, notice that state_dict will collect among dp groups, causing memory pressure
+        _gsd_rank = self.rank
         for vpp_rank, model in enumerate(self.model):
             if len(self.model) > 1:
                 mpu.set_virtual_pipeline_model_parallel_rank(vpp_rank)
@@ -325,7 +339,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         if self.use_distributed_optimizer:
             megatron_config = getattr(self.config, self.role, self.config).megatron
-            dist_ckpt_optim_fully_reshardable = megatron_config.dist_ckpt_optim_fully_reshardable
+            dist_ckpt_optim_fully_reshardable = (
+                megatron_config.dist_ckpt_optim_fully_reshardable
+                or megatron_config.ckpt_optim_fully_reshardable
+            )
             distrib_optim_fully_reshardable_mem_efficient = (
                 megatron_config.distrib_optim_fully_reshardable_mem_efficient
             )
@@ -500,6 +517,20 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         # Note that model weights, optimizer states, and extra states are generated
         # together in a state dict, we save them in one time
+        _rank = self.rank
+
+        # Force-free any transient training-step allocations before measuring the
+        # checkpoint baseline.  Without this, glibc's free-list may hold pages from
+        # the optimizer step, inflating the apparent baseline and making cross-run
+        # comparisons unreliable.
+        import gc as _gc_pre
+        _gc_pre.collect()
+        try:
+            import ctypes as _ctypes_pre
+            _ctypes_pre.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
         if self.use_dist_checkpointing:
             # Generate state dict for saving
             sharded_sd_metadata = self._build_sharded_state_dict_metadata()
@@ -553,6 +584,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if not self.checkpoint_config.async_save:
                 assert async_save_request is None, "Async save request should be None when not using async save."
                 torch.distributed.barrier()
+
+            # Force-free world_tensor pages held by state_dict before returning
+            del state_dict
+            import gc as _gc
+            _gc.collect()
+            # Return freed pages to OS — glibc holds them in its free list otherwise,
+            # inflating the RSS baseline for subsequent training steps and checkpoints.
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
         if self.should_save_model:
             # Save adapter-only checkpoint if PEFT is enabled

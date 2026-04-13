@@ -139,6 +139,7 @@ class McoreEngineConfig(EngineConfig):
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
         dist_checkpointing_path (Optional[str]): Path for distributed checkpointing.
         dist_ckpt_optim_fully_reshardable (bool): Use fully reshardable optimizer checkpoints.
+        ckpt_optim_fully_reshardable (bool): Alias for dist_ckpt_optim_fully_reshardable.
         distrib_optim_fully_reshardable_mem_efficient (bool): Use memory-efficient fully reshardable format.
         seed (int): Random seed for reproducibility.
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
@@ -162,6 +163,7 @@ class McoreEngineConfig(EngineConfig):
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
     dist_ckpt_optim_fully_reshardable: bool = False
+    ckpt_optim_fully_reshardable: bool = False
     distrib_optim_fully_reshardable_mem_efficient: bool = False
     override_ddp_config: dict[str, Any] = field(default_factory=dict)
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
