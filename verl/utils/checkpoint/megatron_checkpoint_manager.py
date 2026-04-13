@@ -341,7 +341,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             megatron_config = getattr(self.config, self.role, self.config).megatron
             dist_ckpt_optim_fully_reshardable = (
                 megatron_config.dist_ckpt_optim_fully_reshardable
-                or megatron_config.ckpt_optim_fully_reshardable
+                or getattr(megatron_config, "ckpt_optim_fully_reshardable", False)
             )
             distrib_optim_fully_reshardable_mem_efficient = (
                 megatron_config.distrib_optim_fully_reshardable_mem_efficient
@@ -591,6 +591,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             _gc.collect()
             # Return freed pages to OS — glibc holds them in its free list otherwise,
             # inflating the RSS baseline for subsequent training steps and checkpoints.
+            print(f"[CKPT-MEM rank={_rank}] before malloc_trim: RSS={_ckpt_mem_mb():.0f} MB", flush=True)
             try:
                 import ctypes
                 ctypes.CDLL("libc.so.6").malloc_trim(0)

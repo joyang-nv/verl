@@ -50,6 +50,9 @@ dist_ckpt_optim_fully_reshardable: True
 # Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
 distrib_optim_fully_reshardable_mem_efficient: False
 
+# Alias for dist_ckpt_optim_fully_reshardable (both spellings accepted)
+ckpt_optim_fully_reshardable: False
+
 # oc.select: default val for ref.megatron.seed
 seed: 42
 

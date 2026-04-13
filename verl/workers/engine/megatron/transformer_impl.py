@@ -333,6 +333,7 @@ class MegatronEngine(BaseEngine):
 
         full_reshardable = self.engine_config.dist_ckpt_optim_fully_reshardable
         mem_eff = self.engine_config.distrib_optim_fully_reshardable_mem_efficient
+        ckpt_optim_fully_reshardable = OmegaConf.select(self.engine_config, "ckpt_optim_fully_reshardable", default=False)
 
         tmp_config = OmegaConf.create(
             {
@@ -340,6 +341,7 @@ class MegatronEngine(BaseEngine):
                 "megatron": {
                     "dist_ckpt_optim_fully_reshardable": full_reshardable,
                     "distrib_optim_fully_reshardable_mem_efficient": mem_eff,
+                    "ckpt_optim_fully_reshardable": ckpt_optim_fully_reshardable,
                 },
             }
         )
