@@ -60,6 +60,29 @@ def _ckpt_mem_mb() -> float:
             return -1.0
 
 
+def _send_ckpt_event(event_name: str, **extras) -> None:
+    """Send a phase event to monitor_memory_proc.py via Unix datagram socket.
+
+    Silent no-op if the monitor isn't running. Used for triggering
+    per-process Ray memory snapshots at each checkpoint phase boundary.
+    Socket path can be overridden via CKPT_MEM_EVENT_SOCKET env var.
+    """
+    import json
+    import os
+    import socket
+
+    sock_path = os.environ.get("CKPT_MEM_EVENT_SOCKET", "/tmp/monitor_memory.sock")
+    if not os.path.exists(sock_path):
+        return
+    try:
+        msg = {"event": event_name, **extras}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            sock.sendto(json.dumps(msg).encode(), sock_path)
+    except OSError:
+        pass
+
+
 def _ckpt_phase(name: str, rank: int):
     """Context manager: emit RSS + wall-clock timing around a checkpoint phase.
 
@@ -69,8 +92,14 @@ def _ckpt_phase(name: str, rank: int):
         [CKPT-MEM rank=N] before <name>: rss=12345 MB
         [CKPT-MEM rank=N] after  <name>: rss=12400 MB elapsed=1.23s delta=+55 MB
 
-    Set env CKPT_MEM_DEBUG=0 to silence; default emits on every rank.
-    Set CKPT_MEM_DEBUG=rank0 to emit only from rank 0.
+    Also fires Unix-socket events (<name>_start, <name>_end) to
+    /tmp/monitor_memory.sock if the per-process monitor is listening,
+    triggering a snapshot of every Ray actor on the node at each phase
+    boundary.
+
+    Set env CKPT_MEM_DEBUG=0 to silence stdout output; default emits on
+    every rank. Set CKPT_MEM_DEBUG=rank0 to emit only from rank 0.
+    Socket events are always sent (cheap no-op if no listener).
     """
     import os
     import time
@@ -80,20 +109,24 @@ def _ckpt_phase(name: str, rank: int):
     def _phase():
         mode = os.environ.get("CKPT_MEM_DEBUG", "all")
         emit = mode != "0" and (mode != "rank0" or rank == 0)
-        if not emit:
-            yield
-            return
         rss_before = _ckpt_mem_mb()
         t_start = time.time()
-        print(f"[CKPT-MEM rank={rank}] before {name}: rss={rss_before:.0f} MB", flush=True)
+        if emit:
+            print(f"[CKPT-MEM rank={rank}] before {name}: rss={rss_before:.0f} MB", flush=True)
+        _send_ckpt_event(f"{name}_start", rank=rank, rss_mb=rss_before)
         yield
         rss_after = _ckpt_mem_mb()
         elapsed = time.time() - t_start
         delta = rss_after - rss_before
-        print(
-            f"[CKPT-MEM rank={rank}] after  {name}: "
-            f"rss={rss_after:.0f} MB elapsed={elapsed:.2f}s delta={delta:+.0f} MB",
-            flush=True,
+        if emit:
+            print(
+                f"[CKPT-MEM rank={rank}] after  {name}: "
+                f"rss={rss_after:.0f} MB elapsed={elapsed:.2f}s delta={delta:+.0f} MB",
+                flush=True,
+            )
+        _send_ckpt_event(
+            f"{name}_end", rank=rank, rss_mb=rss_after,
+            elapsed_s=elapsed, delta_mb=delta,
         )
 
     return _phase()
