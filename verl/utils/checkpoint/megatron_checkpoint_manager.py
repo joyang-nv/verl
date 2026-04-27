@@ -58,6 +58,45 @@ def _ckpt_mem_mb() -> float:
             return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         except Exception:
             return -1.0
+
+
+def _ckpt_phase(name: str, rank: int):
+    """Context manager: emit RSS + wall-clock timing around a checkpoint phase.
+
+    Output format (one line on entry, one on exit) — emitted from every rank
+    so callers can grep by rank for analysis:
+
+        [CKPT-MEM rank=N] before <name>: rss=12345 MB
+        [CKPT-MEM rank=N] after  <name>: rss=12400 MB elapsed=1.23s delta=+55 MB
+
+    Set env CKPT_MEM_DEBUG=0 to silence; default emits on every rank.
+    Set CKPT_MEM_DEBUG=rank0 to emit only from rank 0.
+    """
+    import os
+    import time
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _phase():
+        mode = os.environ.get("CKPT_MEM_DEBUG", "all")
+        emit = mode != "0" and (mode != "rank0" or rank == 0)
+        if not emit:
+            yield
+            return
+        rss_before = _ckpt_mem_mb()
+        t_start = time.time()
+        print(f"[CKPT-MEM rank={rank}] before {name}: rss={rss_before:.0f} MB", flush=True)
+        yield
+        rss_after = _ckpt_mem_mb()
+        elapsed = time.time() - t_start
+        delta = rss_after - rss_before
+        print(
+            f"[CKPT-MEM rank={rank}] after  {name}: "
+            f"rss={rss_after:.0f} MB elapsed={elapsed:.2f}s delta={delta:+.0f} MB",
+            flush=True,
+        )
+
+    return _phase()
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 mcore_ge_014 = version.parse(megatron.core.__version__) >= version.parse("0.14.0")
 if not mcore_ge_014:
@@ -519,84 +558,85 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # together in a state dict, we save them in one time
         _rank = self.rank
 
-        # Force-free any transient training-step allocations before measuring the
-        # checkpoint baseline.  Without this, glibc's free-list may hold pages from
-        # the optimizer step, inflating the apparent baseline and making cross-run
-        # comparisons unreliable.
-        import gc as _gc_pre
-        _gc_pre.collect()
-        try:
-            import ctypes as _ctypes_pre
-            _ctypes_pre.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
+        with _ckpt_phase("save_checkpoint_total", _rank):
+            # Phase 1: pre-save gc + malloc_trim — frees any transient training-step
+            # allocations so the checkpoint baseline is accurate (glibc's free-list
+            # otherwise holds pages from the optimizer step, inflating measurements).
+            with _ckpt_phase("gc_trim_pre_save", _rank):
+                import gc
+                gc.collect()
+                try:
+                    import ctypes
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
 
-        if self.use_dist_checkpointing:
-            # Generate state dict for saving
-            sharded_sd_metadata = self._build_sharded_state_dict_metadata()
-            state_dict = self.generate_state_dict(
-                self.should_save_model,
-                self.should_save_optimizer,
-                self.should_save_extra,
-                metadata=sharded_sd_metadata,
-            )
-            log_with_rank(f"Generated state dict for saving: {state_dict.keys()}", rank=self.rank, logger=logger)
-            for vpp_rank, model in enumerate(self.model):
-                if len(self.model) > 1:
-                    model_i_keys = state_dict[f"model{vpp_rank}"].keys()
-                    log_with_rank(f"Generated state dict for saving: {model_i_keys}", rank=self.rank, logger=logger)
-                else:
-                    log_with_rank(
-                        f"Generated state dict for saving: {state_dict['model'].keys()}", rank=self.rank, logger=logger
+            if self.use_dist_checkpointing:
+                # Phase 2: build sharded state dict (zero-copy views; should be cheap)
+                with _ckpt_phase("generate_state_dict", _rank):
+                    sharded_sd_metadata = self._build_sharded_state_dict_metadata()
+                    state_dict = self.generate_state_dict(
+                        self.should_save_model,
+                        self.should_save_optimizer,
+                        self.should_save_extra,
+                        metadata=sharded_sd_metadata,
                     )
-            # Start Async save if enabled
-            async_save_request = save_dist_checkpointing(
-                sharded_state_dict=state_dict,
-                ckpt_path=dist_checkpoint_path,
-                async_save=self.checkpoint_config.async_save,
-                content_metadata=sharded_sd_metadata,
-            )
+                log_with_rank(f"Generated state dict for saving: {state_dict.keys()}", rank=self.rank, logger=logger)
+                for vpp_rank, model in enumerate(self.model):
+                    if len(self.model) > 1:
+                        model_i_keys = state_dict[f"model{vpp_rank}"].keys()
+                        log_with_rank(f"Generated state dict for saving: {model_i_keys}", rank=self.rank, logger=logger)
+                    else:
+                        log_with_rank(
+                            f"Generated state dict for saving: {state_dict['model'].keys()}", rank=self.rank, logger=logger
+                        )
 
-            # Synchronize all async save requests
-            if not self.checkpoint_config.async_save:
-                assert async_save_request is None, "Async save request should be None when not using async save."
-                torch.distributed.barrier()
-        else:
-            assert self.use_hf_checkpoint, "When not using distributed checkpointing, use_hf_checkpoint should be True."
-            # Generate optimizer and exra state dicts
-            sharded_sd_metadata = self._build_sharded_state_dict_metadata()
-            state_dict = self.generate_state_dict(
-                generate_model=False,
-                generate_optimizer=self.should_save_optimizer,
-                generate_extra=self.should_save_extra,
-                metadata=sharded_sd_metadata,
-            )
-            # Save optimizer and extra states to local path
-            # Start Async save if enabled
-            async_save_request = save_dist_checkpointing(
-                sharded_state_dict=state_dict,
-                ckpt_path=dist_checkpoint_path,
-                async_save=self.checkpoint_config.async_save,
-                content_metadata=sharded_sd_metadata,
-            )
+                # Phase 3: actual disk write (the bulk of save_checkpoint wall-clock)
+                with _ckpt_phase("save_dist_checkpointing", _rank):
+                    async_save_request = save_dist_checkpointing(
+                        sharded_state_dict=state_dict,
+                        ckpt_path=dist_checkpoint_path,
+                        async_save=self.checkpoint_config.async_save,
+                        content_metadata=sharded_sd_metadata,
+                    )
+                    if not self.checkpoint_config.async_save:
+                        assert async_save_request is None, "Async save request should be None when not using async save."
+                        torch.distributed.barrier()
+            else:
+                assert self.use_hf_checkpoint, "When not using distributed checkpointing, use_hf_checkpoint should be True."
+                # Generate optimizer and exra state dicts (HF checkpoint path)
+                with _ckpt_phase("generate_state_dict", _rank):
+                    sharded_sd_metadata = self._build_sharded_state_dict_metadata()
+                    state_dict = self.generate_state_dict(
+                        generate_model=False,
+                        generate_optimizer=self.should_save_optimizer,
+                        generate_extra=self.should_save_extra,
+                        metadata=sharded_sd_metadata,
+                    )
 
-            # Synchronize all async save requests
-            if not self.checkpoint_config.async_save:
-                assert async_save_request is None, "Async save request should be None when not using async save."
-                torch.distributed.barrier()
+                with _ckpt_phase("save_dist_checkpointing", _rank):
+                    async_save_request = save_dist_checkpointing(
+                        sharded_state_dict=state_dict,
+                        ckpt_path=dist_checkpoint_path,
+                        async_save=self.checkpoint_config.async_save,
+                        content_metadata=sharded_sd_metadata,
+                    )
+                    if not self.checkpoint_config.async_save:
+                        assert async_save_request is None, "Async save request should be None when not using async save."
+                        torch.distributed.barrier()
 
-            # Force-free world_tensor pages held by state_dict before returning
-            del state_dict
-            import gc as _gc
-            _gc.collect()
-            # Return freed pages to OS — glibc holds them in its free list otherwise,
-            # inflating the RSS baseline for subsequent training steps and checkpoints.
-            print(f"[CKPT-MEM rank={_rank}] before malloc_trim: RSS={_ckpt_mem_mb():.0f} MB", flush=True)
-            try:
-                import ctypes
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
+            # Phase 4: post-save gc + malloc_trim — release world_tensor pages held
+            # by the state dict and return them to the OS so the next training step
+            # starts from a clean RSS baseline.
+            with _ckpt_phase("gc_trim_post_save", _rank):
+                del state_dict
+                import gc
+                gc.collect()
+                try:
+                    import ctypes
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
 
         if self.should_save_model:
             # Save adapter-only checkpoint if PEFT is enabled
