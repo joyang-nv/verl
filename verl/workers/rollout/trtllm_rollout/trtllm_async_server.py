@@ -26,6 +26,7 @@ from ray.util.placement_group import PlacementGroup
 from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.profiler import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
@@ -86,6 +87,22 @@ class TRTLLMHttpServer:
         self.bundle_indices = bundle_indices
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+
+        profiler_config = self.config.profiler
+        tool_config = None
+        if profiler_config is not None:
+            if profiler_config.tool in ["torch", "npu"]:
+                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
+            elif profiler_config.tool == "nsys":
+                # nsys config lives in global_tool_config, not tool_config
+                from verl.utils.profiler.config import NsightToolConfig
+
+                raw = (profiler_config.global_tool_config or {}).get("nsys")
+                tool_config = omega_conf_to_dataclass(raw) if raw is not None else NsightToolConfig()
+            elif profiler_config.tool is not None:
+                logger.warning(f"trtllm rollout: unsupported profiler tool '{profiler_config.tool}', disabling")
+                profiler_config = None
+        self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
@@ -327,6 +344,16 @@ class TRTLLMHttpServer:
             unique_reply_rank=0,
         )
 
+    async def start_profile(self, **kwargs):
+        if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
+            # Dispatch cudaProfilerStart to every GPU worker across all nodes via collective_rpc.
+            # RayGPUWorker mixes in WorkerExtension.start_profile which calls torch.cuda.profiler.start().
+            await self.llm.collective_rpc("start_profile")
+
+    async def stop_profile(self):
+        if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
+            await self.llm.collective_rpc("stop_profile")
+
 
 class TRTLLMReplica(RolloutReplica):
     def __init__(
@@ -417,13 +444,18 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}"
         )
-
+        _server_env_vars = {"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1", "NCCL_CUMEM_ENABLE": "0"}}
+        # Propagate nsys profiling env vars to the Ray actor so that RayExecutor
+        # (instantiated inside TRTLLMHttpServer) picks them up for inner workers.
+        for _nsys_var in ("TLLM_ENABLE_NSYS", "TLLM_NSYS_OUTPUT_DIR"):
+            if _val := os.environ.get(_nsys_var):
+                _server_env_vars[_nsys_var] = _val
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1", "NCCL_CUMEM_ENABLE": "0"}},
+            runtime_env={"env_vars": _server_env_vars},
             name=name,
             max_concurrency=self.max_concurrency,
         ).remote(
