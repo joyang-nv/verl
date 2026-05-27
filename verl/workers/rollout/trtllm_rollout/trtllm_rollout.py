@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import gc
 import logging
 import os
 import pickle
@@ -38,7 +37,7 @@ except (ImportError, RuntimeError):
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
-from verl.utils.device import get_torch_device
+from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -391,17 +390,25 @@ class ServerAdapter(BaseRollout):
             max_connections=self.config.server.max_connections,
         )
 
+
+    async def _barrier_rollout_mesh(self):
+        if self.hybrid_device_mesh is None:
+            return
+
+        for mesh_name in ("exclude_dp", "dp"):
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh[mesh_name].get_group())
+
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
 
         Args:
             tag: weights or kv_cache.
         """
-        # Synchronize all ranks before resuming KV cache to ensure non-leader ranks
-        # have completed actor offloading to CPU, preventing OOM issue.
+        # Synchronize rollout ranks before and after KV resume so actor ranks do not
+        # race ahead while the TRTLLM workers materialize KV cache.
         if "kv_cache" in tags and self.config.free_cache_engine:
-            group = self.hybrid_device_mesh["exclude_dp"].get_group() if self.hybrid_device_mesh is not None else None
-            await asyncio.to_thread(dist.barrier, group=group)
+            await self._barrier_rollout_mesh()
+
         if self.is_leader_rank and self.config.free_cache_engine:
             if "weights" in tags:
                 tags = self._WEIGHTS_TAGS
@@ -411,6 +418,8 @@ class ServerAdapter(BaseRollout):
                 raise ValueError(f"Invalid tag: {tags}")
             await self._init_server_adapter()
             await self._adapter.resume_memory_occupation(tags=tags)
+        if "kv_cache" in tags and self.config.free_cache_engine:
+            await self._barrier_rollout_mesh()
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
@@ -419,17 +428,19 @@ class ServerAdapter(BaseRollout):
             tags = self._WEIGHTS_TAGS + ["kv_cache"]
             await self._adapter.release_memory_occupation(tags=tags)
 
+        if self.config.free_cache_engine and self.hybrid_device_mesh is not None:
+            await asyncio.to_thread(dist.barrier, group=self.hybrid_device_mesh["exclude_dp"].get_group())
+
     async def update_weights_from_ipc_handles(self, device_handles):
         """Update weights from IPC handles."""
         if self.hybrid_device_mesh is not None:
-            world_size = self.hybrid_device_mesh["exclude_dp"].size()
+            group_size = self.hybrid_device_mesh["exclude_dp"].size()
             group = self.hybrid_device_mesh["exclude_dp"].get_group()
         else:
-            world_size = dist.get_world_size()
+            group_size = dist.get_world_size()
             group = None
-
         if self.is_leader_rank:
-            gathered_handles = [None for _ in range(world_size)]
+            gathered_handles = [None for _ in range(group_size)]
         else:
             gathered_handles = None
 
@@ -441,9 +452,13 @@ class ServerAdapter(BaseRollout):
             group=group,
         )
 
+        aggressive_empty_cache(force_sync=False)
+
         if self.is_leader_rank:
             all_handles = {k: v for d in gathered_handles for k, v in d.items()}
             await self._adapter.update_weights(all_handles)
+            await self.server_actor.synchronize_device.remote()
+            await self.server_actor.cleanup_device_memory.remote()
 
         await asyncio.to_thread(dist.barrier, group=group)
 
@@ -530,8 +545,7 @@ class ServerAdapter(BaseRollout):
         await asyncio.to_thread(dist.barrier, group=group)
 
         del weights
-        gc.collect()
-        get_torch_device().empty_cache()
+        aggressive_empty_cache(force_sync=False)
 
     def _get_attribute(self, name: str):
         return getattr(self, name)
