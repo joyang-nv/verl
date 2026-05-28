@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+import gc
 import inspect
 from typing import Optional
+
+import torch
 
 # Defer tensorrt_llm imports to avoid FlashInfer's check_cuda_arch() crash
 # when this module is loaded on CPU-only Ray actors. The module is normally
@@ -40,6 +43,21 @@ except (ImportError, RuntimeError):
 class WorkerExtension(TrtllmWorkerExtension):
     def __init__(self):
         pass
+
+    @control_action_decorator
+    def synchronize_device(self) -> bool:
+        """Wait for CUDA work queued by this TRT-LLM worker process."""
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(int(self.device_id))
+        return True
+
+    @control_action_decorator
+    def cleanup_device_memory(self) -> None:
+        """Release unused Python and CUDA cached memory in this TRT-LLM worker."""
+        gc.collect()
+        if torch.cuda.is_available():
+            with torch.cuda.device(int(self.device_id)):
+                torch.cuda.empty_cache()
 
     @control_action_decorator
     def supports_partial_loading(self) -> bool:
@@ -191,6 +209,21 @@ class WorkerExtension(TrtllmWorkerExtension):
 # is bumped to include https://github.com/NVIDIA/TensorRT-LLM/pull/13784.
 class RlhfWorkerExtension(TrtllmWorkerExtension):
     """Minimal extension of TRT-LLM's WorkerExtension for non-VLM RLHF models."""
+
+    @control_action_decorator
+    def synchronize_device(self) -> bool:
+        """Wait for CUDA work queued by this TRT-LLM worker process."""
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(int(self.device_id))
+        return True
+
+    @control_action_decorator
+    def cleanup_device_memory(self) -> None:
+        """Release unused Python and CUDA cached memory in this TRT-LLM worker."""
+        gc.collect()
+        if torch.cuda.is_available():
+            with torch.cuda.device(int(self.device_id)):
+                torch.cuda.empty_cache()
 
     @control_action_decorator
     def wait_for_engine_idle(self) -> None:

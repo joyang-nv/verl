@@ -480,6 +480,14 @@ class TRTLLMHttpServer:
                 profiler_config = None
         return DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
+    async def synchronize_device(self) -> None:
+        """Synchronize CUDA work in all TRT-LLM worker processes."""
+        await self.llm.collective_rpc("synchronize_device")
+
+    async def cleanup_device_memory(self) -> None:
+        """Release unused Python and CUDA cached memory in all TRT-LLM worker processes."""
+        await self.llm.collective_rpc("cleanup_device_memory")
+
 
 class TRTLLMReplica(RolloutReplica):
     def __init__(
