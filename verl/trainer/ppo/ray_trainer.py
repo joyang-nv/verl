@@ -40,6 +40,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.best_checkpoint import maybe_save_best_checkpoint as save_best_checkpoint_if_improved
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -971,35 +972,40 @@ class RayPPOTrainer:
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, checkpoint_dir: str | None = None):
         from verl.utils.fs import local_mkdir_safe
 
+        is_default_checkpoint = checkpoint_dir is None
+        checkpoint_dir = checkpoint_dir or self.config.trainer.default_local_dir
+
         # path: given_path + `/global_step_{global_steps}` + `/actor`
-        local_global_step_folder = os.path.join(
-            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
-        )
+        local_global_step_folder = os.path.join(checkpoint_dir, f"global_step_{self.global_steps}")
 
         print(f"local_global_step_folder: {local_global_step_folder}")
         actor_local_path = os.path.join(local_global_step_folder, "actor")
 
         actor_remote_path = (
             None
-            if self.config.trainer.default_hdfs_dir is None
+            if self.config.trainer.default_hdfs_dir is None or not is_default_checkpoint
             else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
         )
 
-        remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
-        if remove_previous_ckpt_in_save:
-            print(
-                "Warning: remove_previous_ckpt_in_save is deprecated,"
-                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
+        if is_default_checkpoint:
+            remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
+            if remove_previous_ckpt_in_save:
+                print(
+                    "Warning: remove_previous_ckpt_in_save is deprecated,"
+                    + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
+                )
+            max_actor_ckpt_to_keep = (
+                self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
             )
-        max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
-        max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
+            max_critic_ckpt_to_keep = (
+                self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            )
+        else:
+            max_actor_ckpt_to_keep = None
+            max_critic_ckpt_to_keep = None
 
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
@@ -1009,7 +1015,7 @@ class RayPPOTrainer:
             critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
             critic_remote_path = (
                 None
-                if self.config.trainer.default_hdfs_dir is None
+                if self.config.trainer.default_hdfs_dir is None or not is_default_checkpoint
                 else os.path.join(
                     self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", str(Role.Critic)
                 )
@@ -1034,11 +1040,48 @@ class RayPPOTrainer:
         ):
             print("skip write latest_checkpointed_iteration.txt when async_save is True")
             return
-        local_latest_checkpointed_iteration = os.path.join(
-            self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
-        )
+        local_latest_checkpointed_iteration = os.path.join(checkpoint_dir, "latest_checkpointed_iteration.txt")
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+    def _maybe_save_best_checkpoint(self, val_metrics: dict[str, Any]) -> bool:
+        """Save current state directly to the best directory when validation accuracy improves."""
+        metric_pattern = self.config.trainer.get("best_checkpoint_metric", None)
+        best_checkpoint_dir = self.config.trainer.get("best_checkpoint_dir", None)
+        if not metric_pattern and not best_checkpoint_dir:
+            return False
+        if not metric_pattern or not best_checkpoint_dir:
+            raise ValueError("trainer.best_checkpoint_metric and trainer.best_checkpoint_dir must be set together")
+        if self.global_steps == 0 and not self.config.trainer.get("best_checkpoint_save_initial", False):
+            return False
+
+        default_checkpoint_dir = os.path.abspath(self.config.trainer.default_local_dir)
+        best_checkpoint_dir = os.path.abspath(best_checkpoint_dir)
+        if os.path.realpath(default_checkpoint_dir) == os.path.realpath(best_checkpoint_dir):
+            raise ValueError("trainer.best_checkpoint_dir must differ from trainer.default_local_dir")
+
+        actor_async_save = self.config.actor_rollout_ref.actor.checkpoint.get("async_save", False)
+        critic_async_save = self.use_critic and self.config.critic.checkpoint.get("async_save", False)
+        if actor_async_save or critic_async_save:
+            raise ValueError(
+                "Best validation checkpoints require synchronous actor and critic checkpoint saving"
+            )
+
+        metadata = save_best_checkpoint_if_improved(
+            metrics=val_metrics,
+            metric_pattern=metric_pattern,
+            best_checkpoint_dir=best_checkpoint_dir,
+            global_step=self.global_steps,
+            save_checkpoint=self._save_checkpoint,
+        )
+        if metadata is None:
+            return False
+
+        print(
+            f"New best checkpoint: {metadata['metric_name']}={metadata['metric_value']} "
+            f"at step {self.global_steps}, saved to {metadata['checkpoint_path']}"
+        )
+        return True
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1395,6 +1438,7 @@ class RayPPOTrainer:
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
+            self._maybe_save_best_checkpoint(val_metrics)
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
                 return
@@ -1690,6 +1734,8 @@ class RayPPOTrainer:
                         val_metrics: dict = self._validate()
                         if is_last_step:
                             last_val_metrics = val_metrics
+                    with marked_timer("save_best_checkpoint", timing_raw, color="green"):
+                        self._maybe_save_best_checkpoint(val_metrics)
                     metrics.update(val_metrics)
 
                 with marked_timer("stop_profile", timing_raw):

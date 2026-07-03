@@ -173,6 +173,15 @@ trainer:
   # Validation frequency (in training iterations)
   test_freq: -1
 
+  # Exact validation metric name or glob pattern to maximize. Disabled when null.
+  best_checkpoint_metric: null
+
+  # Separate directory that retains only the checkpoint with the best validation metric.
+  best_checkpoint_dir: null
+
+  # Whether step 0 (before training) is eligible to become the best checkpoint.
+  best_checkpoint_save_initial: False
+
   # Number of iterations to warm up the critic before updating policy
   critic_warmup: 0
 

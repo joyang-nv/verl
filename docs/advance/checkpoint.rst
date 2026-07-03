@@ -59,6 +59,33 @@ While **Megatron** current checkpoint structure is:
     │   │   └── dist_ckpt
     └── latest_checkpointed_iteration.txt
 
+
+Saving the Best Validation Checkpoint
+-------------------------------------
+
+verl can save a separate checkpoint whenever a validation metric reaches a new maximum. For example,
+the following command-line overrides validate every 10 training steps and retain the checkpoint with
+the best validation accuracy:
+
+.. code:: bash
+
+    trainer.test_freq=10 \
+    'trainer.best_checkpoint_metric=val-core/*/acc/mean@1' \
+    trainer.best_checkpoint_dir=checkpoints/my-experiment-best \
+    trainer.best_checkpoint_save_initial=True
+
+``best_checkpoint_metric`` accepts either an exact metric name or a glob pattern. The pattern must match
+exactly one metric returned by validation. Set ``best_checkpoint_save_initial=True`` to allow the validation
+before training (step 0) to become the initial best checkpoint; otherwise, only periodic validations are
+eligible.
+
+The best-checkpoint directory contains the full, independently saved checkpoint and a
+``best_checkpoint.json`` metadata file. It does not use hard links to the regular checkpoint directory, so
+regular checkpoints can be removed without affecting it. Best validation checkpoints currently require
+synchronous actor and critic checkpoint saving. After a strictly better metric is saved successfully, the
+previous best checkpoint is removed. Consequently, replacement temporarily requires enough
+space for both the previous and new best checkpoints.
+
 Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------
 
